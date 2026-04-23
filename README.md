@@ -75,7 +75,9 @@ Then execute the notebooks in order:
 vlm-cbm-derm-fairness/
 ├── config.yaml                  # All hyperparameters (Section 8)
 ├── requirements.txt
+├── data/                        # unzipped raw data
 ├── notebooks/                   # 8 Colab-ready notebooks
+├── raw/                         # dataset csv and zip files
 ├── src/
 │   ├── data/        # download, label mapping, Dataset classes, transforms
 │   ├── models/      # BiomedCLIP concept predictor, CBM heads, black-box CNN
