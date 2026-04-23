@@ -73,7 +73,7 @@ Then execute the notebooks in order:
 
 ```
 vlm-cbm-derm-fairness/
-├── config.yaml                  # All hyperparameters (Section 8)
+├── config.yaml                  # All hyperparameters
 ├── requirements.txt
 ├── data/                        # unzipped raw data
 ├── notebooks/                   # 8 Colab-ready notebooks
