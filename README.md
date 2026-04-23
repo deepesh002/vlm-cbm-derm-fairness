@@ -47,6 +47,7 @@ raw/
   release_v0.zip                    # Derm7pt   (https://derm.cs.sfu.ca)
   ddidiversedermatologyimages.zip   # DDI       (Stanford AIMI)
   fitzpatrick17k.csv                # Fitz17k   (mattgroh/fitzpatrick17k)
+  fitzpatrick17k.zip                # Fitz17k images   (reach out per instructions on the git repo to get these images link)
 ```
 
 HAM10000 is fetched automatically from Kaggle on first run (needs
@@ -72,9 +73,11 @@ Then execute the notebooks in order:
 
 ```
 vlm-cbm-derm-fairness/
-├── config.yaml                  # All hyperparameters (Section 8)
+├── config.yaml                  # All hyperparameters
 ├── requirements.txt
+├── data/                        # unzipped raw data
 ├── notebooks/                   # 8 Colab-ready notebooks
+├── raw/                         # dataset csv and zip files
 ├── src/
 │   ├── data/        # download, label mapping, Dataset classes, transforms
 │   ├── models/      # BiomedCLIP concept predictor, CBM heads, black-box CNN
