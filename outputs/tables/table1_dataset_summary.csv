@@ -1,0 +1,5 @@
+Dataset,N images,Classes,Fitzpatrick labels,Role
+HAM10000,10015,7,No,Primary training
+Derm7pt,2000,MEL / benign,No,Concept supervision
+Fitzpatrick17k,16577,114,Yes (I-VI),Fairness eval
+DDI,656,malignant / benign,Yes (expert),Fairness gold std

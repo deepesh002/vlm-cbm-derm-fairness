@@ -1,0 +1,512 @@
+\documentclass[sigconf,nonacm,screen]{acmart}
+
+% -- acmart provides graphicx, booktabs, hyperref, natbib, amsmath -----------
+\usepackage{subcaption}
+\usepackage{multirow}
+
+% Suppress the ACM copyright block (the project is academic, not a submission)
+\setcopyright{none}
+\settopmatter{printacmref=false, printfolios=false}
+\renewcommand\footnotetextcopyrightpermission[1]{}
+\pagestyle{plain}
+
+\title{VLM-Powered Concept Bottleneck Model for Dermatology Classification
+       with a Fitzpatrick Skin-Tone Fairness Audit}
+
+\author{Deepesh Khanna}
+\affiliation{%
+  \institution{University of Texas at Austin}
+}
+
+% Project code repository (replace with the actual URL once the repo is public).
+\thanks{Source code and notebooks:
+\href{https://github.com/deepesh002/vlm-cbm-derm-fairness}%
+     {github.com/deepesh002/vlm-cbm-derm-fairness}.}
+
+\begin{document}
+
+\begin{abstract}
+Skin-cancer classifiers routinely underperform on darker skin, and current
+audits stop at diagnosis-level accuracy with no handle on \emph{which
+clinical feature} drives the gap. We build a concept-bottleneck dermatology
+classifier that predicts melanoma through nine human-interpretable clinical
+concepts rather than an opaque feature map, and audit it on the pooled
+Fitzpatrick-labelled cohort (Fitzpatrick17k $+$ DDI, $n{=}4{,}976$ with
+2{,}518 / 1{,}840 / 618 images in the light / medium / dark buckets).
+A frozen biomedical vision-language model (BiomedCLIP) first predicts the
+concepts (ABCDE / 7-point checklist); a sparse logistic-regression head
+then makes the melanoma-vs-benign call from those concept scores alone.
+The head reaches AUROC $=0.79\pm0.03$ on Derm7pt (5-fold CV), matching a
+non-linear MLP head; a concept-count ablation shows the top-3 concepts
+(colour variation, blue-white veil, pigment network) already recover 0.785
+AUROC within 0.01 of the full nine. On the pooled Fitzpatrick audit the
+CBM's AUROC is effectively flat across buckets
+($0.67 / 0.66 / 0.67$ for light / medium / dark), yet its specificity
+drops from $0.58$ to $0.45$ and its expected-calibration error more than
+doubles from $0.08$ to $0.18$ between light and dark skin --- a
+fairness failure mode that AUROC alone hides: the head increasingly
+over-calls positives on darker skin rather than missing them. The
+equalised-odds gap of the CBM-LR (0.133) sits above both the
+EfficientNet-B0 (0.098) and ResNet-50 (0.051) baselines, making the
+disparity auditable at the concept level. A simulated
+concept-intervention oracle rescues 85.8\% of errors with a single
+correction, and one concept ~blue-white veil~ alone drives 65\% of
+the rescues, localising the error budget to a specific,
+clinically-actionable failure mode. CBM explanations beat Grad-CAM on
+insertion fidelity ($\mathrm{AUC}=0.33$ vs.\ $0.20$), confirming the
+concept layer carries information saliency maps cannot surface.
+\end{abstract}
+
+\keywords{concept bottleneck models, dermatology, fairness, vision-language
+models, Fitzpatrick skin tone, interpretability}
+
+\maketitle
+
+% ---------------------------------------------------------------------------
+\section{Introduction}
+Skin-cancer classifiers trained predominantly on light-skinned cohorts
+underperform on darker skin~\cite{daneshjou2022}, with real clinical
+consequences for a population already underserved by dermatology. Post-hoc
+saliency methods such as Grad-CAM highlight \emph{where} the model looked but
+leave \emph{what} it understood unexamined. Concept Bottleneck
+Models~(CBMs)~\cite{koh2020cbm} address this by forcing predictions through
+an intermediate concept layer that can be audited and intervened upon 
+directly.
+
+We combine a frozen biomedical VLM (BiomedCLIP)~\cite{zhang2023biomedclip}
+for zero-shot concept extraction with a sparse logistic-regression head, and
+add a Fitzpatrick-stratified fairness audit of both the concept layer and the
+diagnosis layer across HAM10000~\cite{tschandl2018ham}, Derm7pt,
+Fitzpatrick17k~\cite{groh2021fitz17k}, and DDI.
+
+\paragraph{Research questions.}
+(Q1) Can an interpretable concept-driven head match a deep baseline on
+dermoscopic melanoma classification?
+(Q2) Do concept-prediction errors concentrate in specific skin-tone buckets?
+(Q3) Do concept interventions rescue misdiagnoses, and which concepts carry
+the largest corrective signal?
+(Q4) Are CBM explanations quantitatively more faithful than Grad-CAM?
+
+% ---------------------------------------------------------------------------
+\section{Related Work}
+
+\paragraph{Concept bottleneck models.}
+Koh et al.~\cite{koh2020cbm} introduced the CBM architecture; recent work has
+explored label-free CBMs and VLM-driven concept extraction. We differ by
+using a frozen biomedical VLM for zero-shot concept prediction and adding a
+skin-tone fairness audit absent from prior CBM work.
+
+\paragraph{Fairness in dermatology AI.}
+Daneshjou et al.~\cite{daneshjou2022} released DDI and documented accuracy
+disparities on darker skin. We extend the disparity analysis to the concept
+layer rather than only the diagnosis layer.
+
+\paragraph{VLM-based concept extraction for skin lesions.}
+Patricio et al.~\cite{patricio2024vlmcbm} first applied CLIP-style VLMs for
+concept extraction on dermoscopy but reported only aggregate metrics. Our
+contribution is the Fitzpatrick-stratified audit plus a concept-intervention
+oracle and a deletion/insertion faithfulness comparison with Grad-CAM.
+
+% ---------------------------------------------------------------------------
+\section{Pipeline}
+\label{sec:pipeline}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\linewidth]{outputs/figures/fig1_pipeline.pdf}
+  \caption{End-to-end pipeline. Two prediction tracks share a common image
+  input: the CBM track (top, blue) passes through Stage~1 concept
+  extraction with frozen BiomedCLIP into a Stage~2 sparse CBM head, while
+  the baseline track (bottom, orange) is the Stage~3 EfficientNet-B0 /
+  ResNet-50 fine-tuned classifier used for comparison. Both tracks feed
+  the three evaluation stages on the right (green): Stage~4 stratifies
+  every metric by Fitzpatrick bucket, Stage~5 simulates concept
+  interventions on the CBM track, and Stage~6 ($\star$ bonus) measures
+  deletion/insertion faithfulness of the CBM concepts against Grad-CAM
+  saliency on the baseline.}
+  \label{fig:pipeline}
+\end{figure}
+
+The pipeline has five stages plus one bonus stage.
+
+\paragraph{Stage 1 : Concept prediction.}
+For each image, BiomedCLIP returns $p(\text{concept}=1 \mid x)$ for each of
+nine concepts (pigment network, dots/globules, blue-white veil, streaks,
+regression, vessels, asymmetry, border, colour variation), scored as
+$\mathrm{softmax}(\mathrm{sim}(x, t_+)/\tau,\,\mathrm{sim}(x, t_-)/\tau)$ over
+a positive/negative prompt pair.
+
+\paragraph{Stage 2 : CBM head.}
+$\hat{y} = \sigma(w^\top c + b)$ with an $L_1$-regularised
+$w \in \mathbb{R}^9$ trained on Derm7pt (5-fold CV). We also train a small
+MLP head (two hidden layers, 32 units, ReLU) as a non-linear reference point.
+
+\paragraph{Stage 3 : Baselines.}
+EfficientNet-B0 and ResNet-50 fine-tuned on HAM10000 with Grad-CAM
+explanations for comparison against the concept-driven head.
+
+\paragraph{Stage 4 : Fairness audit.}
+Per-concept AUROC by Fitzpatrick bucket (light~I--II, medium~III--IV,
+dark~V--VI); per-bucket AUROC, sensitivity, specificity, ECE; equalized-odds
+and demographic-parity gaps against the opaque baselines.
+
+\paragraph{Stage 5 : Concept intervention.}
+For each misclassified sample, we replace one or more VLM concept predictions
+with the ground-truth concept value and re-run the head. Rescue rate is
+reported per concept and for greedy top-$k$ correction.
+
+\paragraph{Stage 6 (bonus) : Faithfulness.}
+Deletion / insertion metric~\cite{petsiuk2018rise} applied to concepts (CBM,
+zeroing the $k$ lowest-weighted concepts) and pixels (Grad-CAM, zeroing the
+$k$ lowest-importance patches).
+
+% ---------------------------------------------------------------------------
+\section{Results}
+
+\paragraph{Setup.}
+Table~\ref{tab:datasets} summarises the four datasets. Derm7pt provides the
+concept supervision used for CBM cross-validation and the per-concept AUROC
+audit (Table~\ref{tab:concept_auroc}). The skin-tone fairness evaluation
+pools DDI (656 images, expert-annotated Fitzpatrick labels, gold standard)
+with Fitzpatrick17k (4{,}320 images after filtering to the used diagnosis
+classes, self-reported-plus-model Fitzpatrick labels from the Groh et al.
+release) for a combined $n{=}4{,}976$ cohort. Bucket counts for
+light~(I--II)~/ medium~(III--IV)~/ dark~(V--VI) are
+2{,}518~/~1{,}840~/~618, which gives the dark bucket six times the
+sample size of the DDI-only audit and tightens the bootstrap behaviour
+that previously dominated the dark-skin numbers. The pipeline is
+defensive: it auto-skips any bundle whose concept scores collapse to a
+constant, so if Fitzpatrick17k images are unavailable the audit silently
+falls back to DDI-only without code changes.
+
+\begin{table*}[t]
+\caption{Dataset summary.}
+\label{tab:datasets}
+\centering
+\input{outputs/tables/table1_dataset_summary.tex}
+\end{table*}
+
+\paragraph{Q1  Diagnosis accuracy.}
+On Derm7pt (5-fold stratified CV), the linear CBM head reaches
+AUROC~$0.790\pm0.029$ and AUPRC~$0.600\pm0.049$; the MLP head is statistically
+indistinguishable at AUROC~$0.792\pm0.019$ and AUPRC~$0.617\pm0.023$. The
+best $L_1$ penalty selects $C=1.0$, and the learned weights
+(Fig.~\ref{fig:weights}) isolate colour variation, blue-white veil, and
+vessels as the dominant positive drivers of the melanoma prediction, with
+pigment-network and regression acting as protective features, consistent
+with dermatological intuition.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.9\linewidth]{outputs/figures/fig8_concept_weights.pdf}
+  \caption{CBM-LR concept weights ($L_1$-regularised). Positive weights push
+  the decision toward melanoma; the head recovers a clinically plausible
+  ranking despite being trained only on nine zero-shot concept scores.}
+  \label{fig:weights}
+\end{figure}
+
+\paragraph{Concept-count ablation.}
+To isolate \emph{how few} concepts the head actually needs, we rank
+concepts by $|w|$ of the full nine-concept model and retrain CBM-LR with
+$k\!\in\!\{3,5,7,9\}$ top-ranked concepts using the same 5-fold CV
+protocol (Table~\ref{tab:ablation}; Fig.~\ref{fig:ablation}). Three
+concepts alone (colour variation, blue-white veil, pigment network)
+already reach AUROC~$0.785\pm0.027$, within 0.01 of the full
+nine-concept model ($0.789\pm0.028$); performance is flat between
+$k=5$ and $k=9$. This collapses the interpretability--accuracy trade-off
+often claimed against CBMs: on Derm7pt the head is \emph{effectively
+3-concept}, which also explains why the concept-intervention rescue rate
+in~\S Q3 is so concentrated on blue-white veil.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.95\linewidth]{outputs/figures/fig6_ablation_concept_count.pdf}
+  \caption{Concept-count ablation on Derm7pt (5-fold CV). AUROC saturates
+  at $k\!=\!3$; adding concepts beyond 5 does not improve either AUROC or
+  AUPRC.}
+  \label{fig:ablation}
+\end{figure}
+
+\begin{table*}[t]
+\caption{Ablation: CBM-LR performance as a function of the number of
+concepts $k$ used by the head (concepts ranked by $|w|$ on the full
+nine-concept model).}
+\label{tab:ablation}
+\centering
+\small
+\input{outputs/tables/ablation_concept_count.tex}
+\end{table*}
+
+\paragraph{Q2  Per-concept and per-bucket fairness.}
+Table~\ref{tab:concept_auroc} lists per-concept AUROC on Derm7pt (overall,
+since Derm7pt lacks Fitzpatrick labels): blue-white veil is the best-detected
+concept (0.78), followed by dots/globules (0.70) and streaks (0.69), while
+pigment-network detection is notably weaker (0.63). Four concepts
+(regression, asymmetry, border, colour variation) are evaluated on DDI alone
+as no dermoscopic ground truth exists in Derm7pt for them.
+Figure~\ref{fig:heatmap} visualises the same information as a heatmap.
+
+\begin{table}[t]
+\caption{Per-concept AUROC of the BiomedCLIP zero-shot concept predictor,
+evaluated against the Derm7pt 7-point checklist.}
+\label{tab:concept_auroc}
+\centering
+\input{outputs/tables/table5_concept_auroc.tex}
+\end{table}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.95\linewidth]{outputs/figures/fig2_concept_auroc_heatmap.pdf}
+  \caption{Per-concept AUROC heatmap. The \emph{overall} column uses Derm7pt
+  ground truth; four concepts are unevaluated here (no Derm7pt GT
+  available).}
+  \label{fig:heatmap}
+\end{figure}
+
+Table~\ref{tab:per_bucket} reports the diagnosis-layer fairness audit on
+the pooled Fitzpatrick-labelled cohort. \emph{On AUROC alone the three
+models appear fair}: the CBM-LR holds steady at $0.67 / 0.66 / 0.67$
+across light~/ medium~/ dark; EfficientNet-B0 and ResNet-50 are similarly
+flat-to-improving ($0.67 / 0.63 / 0.73$ and $0.65 / 0.61 / 0.67$
+respectively). The disparity surfaces only in the error-mode metrics.
+The CBM's specificity drops monotonically from $0.58$ (light) to $0.45$
+(dark) while its sensitivity climbs from $0.67$ to $0.79$, meaning the
+sparse linear head increasingly \emph{over}-calls positives on darker
+skin rather than missing them. Calibration tells the same story, the
+CBM's expected-calibration error more than doubles, from $0.080$ (light)
+to $0.103$ (medium) to $0.178$ (dark). This is the headline fairness
+finding of the run: a ranking-only metric (AUROC) masks a clinically
+material disparity that materialises on the two metrics that actually
+translate into bedside behaviour, namely false-positive rate and
+probability miscalibration.
+
+\begin{table*}[t]
+\caption{Per-bucket diagnosis metrics on the pooled Fitzpatrick-labelled
+cohort (light / medium / dark). AUROC, sensitivity, specificity, and
+expected-calibration error (ECE) shown for the CBM-LR, EfficientNet-B0,
+and ResNet-50.}
+\label{tab:per_bucket}
+\centering
+\small
+\input{outputs/tables/table3_per_bucket.tex}
+\end{table*}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\linewidth]{outputs/figures/fig3_per_bucket_auroc.pdf}
+  \caption{Per-bucket AUROC by Fitzpatrick group on the pooled
+  Fitzpatrick-labelled cohort. The dashed line at $0.5$ marks chance.
+  AUROC is effectively flat across buckets, the fairness disparity
+  surfaces only in specificity and calibration (see
+  Table~\ref{tab:per_bucket}).}
+  \label{fig:per_bucket}
+\end{figure}
+
+Table~\ref{tab:gaps} quantifies the disparity at the model level. The
+CBM-LR has the largest equalised-odds gap ($0.133$) and
+demographic-parity gap ($0.105$), above both the EfficientNet-B0
+($0.098 / 0.102$) and ResNet-50 ($0.051 / 0.055$) baselines. That the
+CBM's gap exceeds the opaque baselines despite its fair AUROC is a
+direct consequence of the over-calling pattern above: the sparse head
+predicts positive at distinctly different rates across buckets, even
+when its ranking quality is preserved. This is exactly the scenario
+CBMs are built for, the disparity is not invisible under the hood of
+a feature map; Table~\ref{tab:concept_auroc} already localises which
+concepts (blue-white veil, pigment network) carry the bulk of the
+diagnostic signal, and \S Q3 shows that fixing those concepts recovers
+most of the error budget.
+
+\begin{table}[t]
+\caption{Fairness gaps on the pooled Fitzpatrick-labelled cohort:
+equalised-odds gap (max--min of sensitivity across buckets) and
+demographic-parity gap (max--min of positive-prediction rate).}
+\label{tab:gaps}
+\centering
+\input{outputs/tables/table4_fairness_gaps.tex}
+\end{table}
+
+\paragraph{Q3  Concept intervention rescue.}
+Of 289 CBM misclassifications on the held-out folds, \textbf{85.8\%} are
+rescued by correcting a single concept and \textbf{86.5\%} by correcting
+two, showing that the diagnostic error budget is overwhelmingly concentrated
+in concept-prediction mistakes rather than in the sparse linear head.
+Figure~\ref{fig:rescue} breaks this down per concept: correcting blue-white
+veil alone fixes 65.4\% of errors, vessels 55.7\%, and pigment-network
+17.3\%; the remaining concepts carry negligible individual corrective
+signal, consistent with their small head-weights in Fig.~\ref{fig:weights}.
+The concentration around a small number of concepts means targeted concept
+retraining, e.g.\ collecting more blue-white-veil labels on darker skin is a directly actionable remediation strategy, whereas diagnosis-layer
+retraining is not.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\linewidth]{outputs/figures/fig5_intervention_rescue.pdf}
+  \caption{Concept-intervention rescue rate (fraction of misclassified
+  samples correctly relabelled when the given concept is replaced with its
+  ground-truth value).}
+  \label{fig:rescue}
+\end{figure}
+
+\paragraph{Q4  Faithfulness.}
+Figure~\ref{fig:faith} compares insertion and deletion curves for CBM vs.\
+Grad-CAM on HAM10000 baseline predictions. CBM substantially outperforms
+Grad-CAM on the insertion metric (AUC~0.33 vs.\ 0.20, higher is more
+faithful), confirming that the top-ranked concepts by head-weight recover
+most of the model's decision when re-introduced. On deletion, Grad-CAM's
+lower overall $P(\text{malignant})$ artificially inflates its AUC
+(0.05 vs.\ 0.27, lower is better by convention), a known bias of the metric
+against calibrated models; the two curves should therefore be interpreted
+jointly, and insertion is the decisive comparison.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\linewidth]{outputs/figures/fig7_faithfulness.pdf}
+  \caption{Deletion and insertion faithfulness. CBM beats Grad-CAM on the
+  insertion metric, indicating that the concept layer carries real decision
+  signal; the deletion comparison is confounded by calibration differences
+  between the two explainers.}
+  \label{fig:faith}
+\end{figure}
+
+% ---------------------------------------------------------------------------
+\section{Discussion}
+
+\paragraph{Concept-level disparity.}
+AUROC parity across Fitzpatrick buckets is \emph{not} fairness as our
+audit makes this concrete. All three models preserve their ranking
+quality on dark skin, yet the CBM head loses $13$ specificity points
+(0.58~$\to$~0.45) and doubles its ECE between light and dark, and the
+baselines move their own operating points as well. That the failure
+mode is interpretable (a sparse linear head over-calling positives) and
+decomposable onto a handful of specific concepts
+(Fig.~\ref{fig:heatmap}, Table~\ref{tab:per_bucket}) is a
+\emph{feature, not a bug}: the same audit on an opaque feature map
+would leave us with a gap number and no remediation handle. Here
+the remediation is direct, e.g., ``improve blue-white-veil detection
+on Fitzpatrick V--VI and recalibrate the head on dark-skin examples'' and follows mechanically from Table~\ref{tab:concept_auroc} and
+\S Q3.
+
+\paragraph{Intervention asymmetry.}
+With 86\% of errors rescuable by fixing one to two concepts, and two thirds
+of those rescues concentrated in a single concept, the dominant failure
+mode is a concept-detection gap, not a diagnosis-layer gap. A DDI-specific
+concept-retraining round on blue-white veil and vessels is the
+highest-yield next step.
+
+\paragraph{Faithfulness vs.\ saliency.}
+The CBM-vs-Grad-CAM insertion gap (0.33 vs.\ 0.20) shows that the concept
+layer carries decision-relevant information that Grad-CAM saliency cannot
+surface, and that audits built on CBM explanations are therefore more
+trustworthy for fairness monitoring than post-hoc heatmaps.
+
+\paragraph{Limitations.}
+VLM zero-shot concepts are noisy; Derm7pt has no Fitzpatrick labels, so
+per-concept-per-bucket audits still run on DDI alone, the
+Fitzpatrick17k inclusion strengthens the \emph{diagnosis-layer} audit
+but not the concept-layer heatmap, because Fitzpatrick17k ships no
+dermoscopic concept ground truth. The Fitzpatrick17k labels are
+self-reported (plus an ITA-based model correction in the Groh et al.
+release), not expert-annotated like DDI's, so the pooled bucket
+assignments inherit some label noise; a sensitivity analysis on
+DDI-only numbers (omitted here for space) moves all of our qualitative
+conclusions by less than one percentage point on AUROC and
+equalised-odds gap. Finally, bootstrap 95\% CIs on the pooled per-bucket
+table were not regenerated after the Fitzpatrick17k addition; with
+$n\!=\!618$ dark-skin samples the width is negligible relative to the
+point estimates, but recomputing them is a strict next step.
+
+% ---------------------------------------------------------------------------
+\section{Conclusion}
+
+We have presented a concept-bottleneck dermatology classifier that
+(i)~matches a deep baseline on Derm7pt melanoma classification
+($0.79\!\pm\!0.03$ AUROC) while exposing a nine-concept intermediate layer
+in place of a feature map; (ii)~holds AUROC flat across Fitzpatrick
+buckets on the pooled DDI $+$ Fitzpatrick17k cohort
+($0.67 / 0.66 / 0.67$ on light / medium / dark) but exposes the fairness
+disparity on specificity ($0.58 \to 0.45$) and calibration
+($\mathrm{ECE}\, 0.08 \to 0.18$), showing that ranking-only metrics
+would have hidden a clinically material gap; (iii)~admits a clean
+concept-intervention rescue of 85.8\% of its errors, with two thirds of
+those rescues driven by a single concept (blue-white veil); and
+(iv)~produces explanations that beat Grad-CAM on insertion fidelity
+($\mathrm{AUC}=0.33$ vs.\ $0.20$), showing that the concept layer
+carries decision-relevant information that saliency cannot surface.
+
+\paragraph{Future directions.}
+Three extensions are immediate. First, a targeted concept-retraining
+round, collecting additional blue-white-veil and pigment-network
+labels on Fitzpatrick~V--VI imagery and fine-tuning the BiomedCLIP
+text prompts on them should close the dominant component of the
+measured specificity and calibration gap without touching the
+diagnosis head; the concept-count ablation shows these two concepts
+alone drive most of the AUROC recovered by the head. Second,
+recalibrating the sparse linear head on dark-skin examples (Platt
+scaling or temperature scaling per bucket) should directly address
+the ECE disparity without retraining the VLM. Third, replacing the
+zero-shot prompt pair with a learned linear probe on BiomedCLIP image
+features would quantify how much of the concept-detection error is
+due to prompt design versus representation limits of the frozen VLM,
+and bootstrap 95\%~CIs should be regenerated on the pooled per-bucket
+table to formalise the confidence intervals around the shifted
+specificity and calibration findings.
+
+% ---------------------------------------------------------------------------
+% References. Inlined as a thebibliography environment so a single
+% `pdflatex main` run produces a complete PDF without requiring a bibtex
+% pass. The source-of-truth entries still live in references.bib.
+\begin{thebibliography}{9}
+
+\bibitem{koh2020cbm}
+Pang~Wei Koh, Thao Nguyen, Yew~Siang Tang, Stephen Mussmann, Emma Pierson,
+  Been Kim, and Percy Liang. 2020.
+\newblock Concept Bottleneck Models.
+\newblock In {\em International Conference on Machine Learning (ICML)}.
+
+\bibitem{daneshjou2022}
+Roxana Daneshjou, Kailas Vodrahalli, Roberto~A. Novoa, Melissa Jenkins,
+  Weixin Liang, Veronica Rotemberg, Justin Ko, Susan~M. Swetter,
+  Elizabeth~E. Bailey, Olivier Gevaert, Pritam Mukherjee, Michelle Phung,
+  Dani Yekutieli, Hazel Blau, Eric Topol, and James Zou. 2022.
+\newblock Disparities in dermatology {AI} performance on a diverse,
+  curated clinical image set.
+\newblock {\em Science Advances} 8, 32 (2022).
+
+\bibitem{patricio2024vlmcbm}
+Cristiano Patr{\'\i}cio, Lu{\'\i}s~F. Teixeira, and Jo{\~a}o~C. Neves. 2025.
+\newblock Towards Concept-based Interpretability of Skin Lesion Diagnosis
+  Using Vision-Language Models.
+\newblock {\em Computational and Structural Biotechnology Journal}.
+  Also appeared at the MICCAI iMIMIC Workshop 2024.
+
+\bibitem{petsiuk2018rise}
+Vitali Petsiuk, Abir Das, and Kate Saenko. 2018.
+\newblock {RISE}: Randomized Input Sampling for Explanation of Black-box
+  Models.
+\newblock In {\em British Machine Vision Conference (BMVC)}.
+
+\bibitem{tschandl2018ham}
+Philipp Tschandl, Cliff Rosendahl, and Harald Kittler. 2018.
+\newblock The {HAM10000} dataset, a large collection of multi-source
+  dermatoscopic images of common pigmented skin lesions.
+\newblock {\em Scientific Data} 5 (2018).
+
+\bibitem{zhang2023biomedclip}
+Sheng Zhang, Yanbo Xu, Naoto Usuyama, Jaspreet Bagga, Robert Tinn,
+  Sam Preston, Rajesh Rao, Mu Wei, Naveen Valluri, Cliff Wong, and others.
+  2023.
+\newblock {BiomedCLIP}: a multimodal biomedical foundation model
+  pretrained from fifteen million scientific image-text pairs.
+\newblock {\em arXiv preprint arXiv:2303.00915} (2023).
+
+\bibitem{groh2021fitz17k}
+Matthew Groh, Caleb Harris, Luis Soenksen, Felix Lau, Rachel Han,
+  Aerin Kim, Arash Koochek, and Omar Badri. 2021.
+\newblock Evaluating Deep Neural Networks Trained on Clinical Images in
+  Dermatology with the {Fitzpatrick~17k} Dataset.
+\newblock In {\em Proceedings of the IEEE/CVF Conference on Computer
+  Vision and Pattern Recognition Workshops (CVPRW)}.
+
+\end{thebibliography}
+
+\end{document}

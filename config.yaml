@@ -1,0 +1,143 @@
+# =============================================================================
+# config.yaml - Central hyperparameter registry
+# Mirrors Section 8 of the project proposal.
+# =============================================================================
+
+seed: 42
+
+# -----------------------------------------------------------------------------
+# Compute (device + DataLoader defaults)
+# -----------------------------------------------------------------------------
+compute:
+  # "auto" picks MPS on Apple Silicon, CUDA on NVIDIA, else CPU.
+  device: "auto"
+  # macOS fork-start-method + DataLoader workers can hang; 0 is the safe default.
+  num_workers: 0
+  # Enable fp32 matmul paths everywhere (MPS is sensitive to fp16 edge cases).
+  prefer_fp32: true
+
+# -----------------------------------------------------------------------------
+# Paths (relative to repo root unless overridden by a notebook)
+# -----------------------------------------------------------------------------
+paths:
+  # Where the user drops raw download archives (Derm7pt zip, DDI zip, etc.)
+  raw_root: "raw"
+  data_root: "data"
+  outputs_root: "outputs"
+  concept_vectors_dir: "outputs/concept_vectors"
+  figures_dir: "outputs/figures"
+  tables_dir: "outputs/tables"
+  checkpoints_dir: "outputs/model_checkpoints"
+  datasets:
+    ham10000: "data/ham10000"
+    derm7pt: "data/derm7pt"
+    fitzpatrick17k: "data/fitzpatrick17k"
+    ddi: "data/ddi"
+
+# -----------------------------------------------------------------------------
+# Stage 1 - VLM-based concept prediction (Section 5.1)
+# -----------------------------------------------------------------------------
+vlm:
+  # Primary backbone
+  model_name: "microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224"
+  open_clip_hub_id: "hf-hub:microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224"
+  image_size: 224
+  # Conservative default for MacBook / MPS. Bump to 64/128 on CUDA.
+  batch_size: 32
+  # Temperature: use model's learnable logit_scale by default. Override for ablations.
+  temperature: null
+  # Fallback backbone (Section 5.1)
+  fallback_model: "MONET"
+  fallback_trigger_auroc_threshold: 0.55  # switch if >50% of concepts fall below this
+
+# -----------------------------------------------------------------------------
+# Concept vocabulary (Section 15) - implemented in concept_predictor.py
+# -----------------------------------------------------------------------------
+concepts:
+  - pigment_network
+  - dots_globules
+  - blue_white_veil
+  - streaks
+  - regression
+  - vascular
+  - asymmetry
+  - border
+  - color_var
+
+# First 6 are supervised by Derm7pt; last 3 are VLM-only.
+derm7pt_supervised_concepts:
+  - pigment_network
+  - dots_globules
+  - blue_white_veil
+  - streaks
+  - regression
+  - vascular
+
+# -----------------------------------------------------------------------------
+# Stage 2 - CBM classifier (Section 5.2)
+# -----------------------------------------------------------------------------
+cbm_lr:
+  penalty: "l1"
+  C: 1.0
+  C_grid: [0.01, 0.1, 1.0, 10.0]
+  solver: "liblinear"    # liblinear supports L1
+  max_iter: 2000
+  class_weight: "balanced"
+  cv_folds: 5
+
+cbm_mlp:
+  hidden_dim: 32
+  hidden_dim_grid: [16, 32, 64]
+  dropout: 0.3
+  dropout_grid: [0.2, 0.3, 0.5]
+  learning_rate: 1.0e-3
+  lr_grid: [1.0e-4, 1.0e-3, 1.0e-2]
+  weight_decay: 1.0e-4
+  epochs: 100
+  early_stopping_patience: 10
+  batch_size: 64
+
+# -----------------------------------------------------------------------------
+# Stage 3 - Black-box baselines (Section 5.3)
+# -----------------------------------------------------------------------------
+baseline:
+  architectures: ["efficientnet_b0", "resnet50"]
+  learning_rate: 1.0e-4
+  optimizer: "adamw"
+  weight_decay: 1.0e-4
+  epochs: 20
+  early_stopping_patience: 5
+  # On an M-series MacBook the MPS device has ~8-16 GB unified memory.
+  # 16 is the default; bump up to 32 if you have an M2/M3 Pro/Max.
+  batch_size: 16
+  image_size: 224
+  num_workers: 0
+  pretrained: true
+
+# -----------------------------------------------------------------------------
+# Stage 4 - Fairness audit (Section 5.4)
+# -----------------------------------------------------------------------------
+fairness:
+  fitzpatrick_buckets:
+    light: [1, 2]
+    medium: [3, 4]
+    dark: [5, 6]
+  bootstrap_resamples: 1000
+  ece_n_bins: 10
+  alpha: 0.05   # for 95% CIs
+
+# -----------------------------------------------------------------------------
+# Stage 5 - Concept intervention (Section 5.5)
+# -----------------------------------------------------------------------------
+intervention:
+  max_concepts_to_correct: 3   # also run single-concept + top-k analyses
+  stratify_by: "fitzpatrick_bucket"
+
+# -----------------------------------------------------------------------------
+# Stage 6 (bonus) - Faithfulness (Section 5.6)
+# -----------------------------------------------------------------------------
+faithfulness:
+  cbm_steps: 9              # one per concept
+  pixel_steps: 100          # Grad-CAM deletion/insertion steps
+  mask_value: 0.0           # value used when deleting pixels / concepts
+  gradcam_target_layer: "layer4"   # ResNet-50; set to "blocks.6" or similar for EffNet
