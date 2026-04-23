@@ -47,6 +47,7 @@ raw/
   release_v0.zip                    # Derm7pt   (https://derm.cs.sfu.ca)
   ddidiversedermatologyimages.zip   # DDI       (Stanford AIMI)
   fitzpatrick17k.csv                # Fitz17k   (mattgroh/fitzpatrick17k)
+  fitzpatrick17k.zip                # Fitz17k images   (reach out per instructions on the git repo to get these images link)
 ```
 
 HAM10000 is fetched automatically from Kaggle on first run (needs
